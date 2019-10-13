@@ -1,3 +1,37 @@
+﻿/* Pouzil som Open Source kniznicu na vypocet CRC zo stranky https://www.libcrc.org
+ * 
+ * Library: libcrc
+ * File:    src/crckrmit.c
+ * Author:  Lammert Bies
+ *
+ * This file is licensed under the MIT License as stated below
+ *
+ * Copyright (c) 1999-2016 Lammert Bies
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * Description
+ * -----------
+ * The source file src/crckrmit.c contains routines which calculate the CRC
+ * Kermit cyclic redundancy check value for an incomming byte string.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,7 +39,100 @@
 
 #pragma comment(lib,"ws2_32.lib") //winsock library
 
+#define		CRC_POLY_KERMIT		0x8408
+#define		CRC_START_KERMIT	0x0000
+ //pouzivanie polynomu x16 + x12 + x5 + 1 ale inverzneho!
+
+static unsigned short	crc_tab[256];
+
+static void init_crc_tab() {
+
+	unsigned short i;
+	unsigned short j;
+	unsigned short crc;
+	unsigned short c;
+
+	for (i = 0; i < 256; i++) {
+
+		crc = 0;
+		c = i;
+
+		for (j = 0; j < 8; j++) {
+
+			if ((crc ^ c) & 0x0001) crc = (crc >> 1) ^ CRC_POLY_KERMIT;
+			else                      crc = crc >> 1;
+
+			c = c >> 1;
+		}
+
+		crc_tab[i] = crc;
+	}
+
+}
+
+unsigned short crc_kermit(const unsigned char *input_str, int num_bytes) {
+
+	unsigned short crc;
+	unsigned short tmp;
+	unsigned short short_c;
+	unsigned short low_byte;
+	unsigned short high_byte;
+	const unsigned char *ptr;
+	int a;
+
+	crc = CRC_START_KERMIT;
+	ptr = input_str; 
+
+		if (ptr != NULL) for (a = 0; a < num_bytes; a++) {
+
+			short_c = 0x00ff & (unsigned short)*ptr;
+			tmp = crc ^ short_c;
+			crc = (crc >> 8) ^ crc_tab[tmp & 0xff];
+
+			ptr++;
+		}
+
+	low_byte = (crc & 0xff00) >> 8;
+	high_byte = (crc & 0x00ff) << 8;
+	crc = low_byte | high_byte;
+
+	return crc;
+
+}
+
 int GetCommand(char clientFlag, char serverFlag, char ipFlag, char portFlag);
+
+int CreateFirstPacket(int fragmentsCount, int sizeOfGFragments, char type)
+{
+	int size = 0;
+	char *message = malloc(sizeof(char) * 256);
+
+
+	*(int*)message = fragmentsCount; //num of frag
+	size += 4;
+
+	*(int*)((char*)message + size) = sizeOfGFragments; //size
+	size += 4;
+
+	if (type == 'm')
+	{
+		strcpy(message + size, "msg\0"); //Za string musi ist \0 !!!
+		size += 4;
+	}
+	else
+	if(type == 'i')
+	{
+		strcpy(message + size, "img\0"); //Za string musi ist \0 !!!
+		size += 4;
+		//strcpy(message + 12, "test.png\0"); Aktualne nepotrebujeme
+	}
+
+	*(unsigned short*)((char*)message + size) = crc_kermit(message, size);
+	size += 4;
+
+	free(message);
+	return size;
+}
 
 //WRONG PACKET SETUP !! DONT FORGET
 int client(struct sockaddr_in tmp)
@@ -46,27 +173,17 @@ int client(struct sockaddr_in tmp)
 		{
 			getchar();
 
-			//printf("Enter message:\n");
-			message = malloc(sizeof(char) * 256);
-			*(int*)message = 9999; //num of frag
-			*(int*)((char*)message + 4) = 35; //size
-			//*(message + 8) = "msg";
-			//*(message + 11) = "test.png";
-			//*(int*)((char*)message + 8) = 14;
-			//*(short*)((char*)message + 8) = 14;
-			strcpy(message + 8, "msg ");
-			strcpy(message + 12, "test.png ");
-			*(int*)((char*)message + 21) = 1110011;
-				/*fgets(message, 255, stdin);
-				printf("MSg later: %d\n", *(int*)message);
-				while (message[i] != '/0' && message[i] != '\n')
-				{
-					i++;
-				}*/
-			printf("SENDING FIRT DATA");
+
+			printf("Enter message:\n");
+			message = malloc(sizeof(char) * 2800);
+			fgets(message, 255, stdin);
+			while (message[i] != '/0' && message[i] != '\n')
+			{
+				i++;
+			}
 
 			//send the message
-			if (sendto(socketVar, message, 40, 0, (struct sockaddr *)&si_other, slen) == SOCKET_ERROR)
+			if (sendto(socketVar, message, 256, 0, (struct sockaddr *)&si_other, slen) == SOCKET_ERROR)
 			{
 				printf("Sending message failed, code %d\n", WSAGetLastError());
 				return 1;
@@ -229,7 +346,6 @@ int server(struct sockaddr_in tmp)
 	//Prepare sockaddr_in
 	server.sin_family = AF_INET;
 	server.sin_addr.s_addr = INADDR_ANY;
-	//server.sin_addr.s_addr = inet_addr("147.175.180.71");
 	server.sin_port = htons(tmp.sin_port);
 
 	printf("IP adress is: %s\n", inet_ntoa(server.sin_addr));
@@ -241,8 +357,10 @@ int server(struct sockaddr_in tmp)
 		//printf("Bind failed with error code : %d\n", WSAGetLastError());
 		return 1;
 	}
+/*
+#pragma region FIRST_FRAGMENT
 
-	//TESTING
+	//TESTING - CATCH FIRST FRAGMENT
 	buffer = malloc(1500);
 	if ((recieved_len = recvfrom(socketVar, buffer, 1500, 0, (struct sockaddr*)&si_other, &slen)) == SOCKET_ERROR)
 	{
@@ -252,23 +370,37 @@ int server(struct sockaddr_in tmp)
 	}
 
 	printf("Received packet from %s:%d\n", inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port));
+
+
 	printf("Pocet fragmentov je %d\n", *(int*)buffer);
 	printf("Velkost fragmentov je %d\n", *(int*)((char*)buffer + 4));
 
-	char *tmpPointer = strtok(buffer+8, " ");
 	int tmpLen = 0;
+	char *tmpChar = malloc(20);
 
-	printf("Typ spravy je %s ", tmpPointer);
-	tmpLen += strlen(tmpPointer);
-	tmpPointer = strtok(NULL, " ");
+	sscanf(buffer + 8, "%s", tmpChar);
+	printf("Typ spravy je %s\n", tmpChar);
+	tmpLen += strlen(tmpChar);
 
-	printf("Nazov je %s ", tmpPointer);
-	tmpLen += strlen(tmpPointer);
+	sscanf(buffer + 12, "%s", tmpChar);
+	printf("Nazov je %s\n", tmpChar);
+	tmpLen += strlen(tmpChar);
 	tmpLen += 2; //lebo medzery
-	printf("Checksum je %d\n", *(int*)((char*)buffer + 8+tmpLen));
 
+	unsigned short checksum = *(unsigned short*)((char*)buffer + 8 + tmpLen);
+	printf("Checksum 1 je %hu\n", checksum);
+	unsigned short checksum2 = crc_kermit(buffer, 20);
+	printf("Checksum 2 je %hu\n", checksum2);
+	if (checksum == checksum2)
+		printf("Checksum OK!\n");
+	else
+		printf("Checksum is different :(\n");
+	free(tmpChar);
 	free(buffer);
 	//KONIEC TESTU
+
+#pragma endregion
+	*/
 
 	int tmpCount = -1;
 	printf("Server initialized\n");
@@ -341,7 +473,6 @@ int server(struct sockaddr_in tmp)
 
 }
 
-
 int GetCommand(char clientFlag, char serverFlag, char ipFlag, char portFlag)
 {
 	char *pointerTmp;
@@ -359,14 +490,13 @@ int GetCommand(char clientFlag, char serverFlag, char ipFlag, char portFlag)
 
 		if (!strcmp(pointerTmp, "set"))
 		{
-			//printf("Set found\n");
 			pointerTmp = strtok(NULL, " \n");
 			if (!strcmp(pointerTmp, "port"))
 			{
 				pointerTmp = strtok(NULL, " \n");
 				tmp.sin_port = atoi(pointerTmp);
 				portFlag = 1;
-				printf("Port: %d\n", tmp.sin_port);
+				printf("Port set to %d", tmp.sin_port);
 			}
 			else
 				if (!strcmp(pointerTmp, "ip"))
@@ -374,23 +504,21 @@ int GetCommand(char clientFlag, char serverFlag, char ipFlag, char portFlag)
 					pointerTmp = strtok(NULL, " \n");
 					tmp.sin_addr.S_un.S_addr = inet_addr(pointerTmp);
 					ipFlag = 1;
-					printf("IP adress is: %s\n", inet_ntoa(tmp.sin_addr));
+					printf("IP adress set to %s", inet_ntoa(tmp.sin_addr));
 				}
 				else
-					printf("Wrong command\n");
+					printf("Wrong command");
 		}
 		else
 		{
-			//strcmp vracia 0 ak sa to podari
 			if (!strcmp(pointerTmp, "start"))
 			{
-				//printf("Start found\n");
 				pointerTmp = strtok(NULL, " \n");
 				if (!strcmp(pointerTmp, "server"))
 				{
 					if (portFlag == 0)
 					{
-						printf("Set up port first! cmd: set port xxx\n");
+						printf("Set up port first! cmd: set port xxx");
 						continue;
 					}
 					else
@@ -404,30 +532,37 @@ int GetCommand(char clientFlag, char serverFlag, char ipFlag, char portFlag)
 				else
 					if (!strcmp(pointerTmp, "client"))
 					{
-						if (portFlag == 0 || ipFlag == 0)
+						if (portFlag == 0)
 						{
-							printf("Set up port and ip first!\n");
+							printf("Set up port first! cmd: set port xxx");
 							continue;
 						}
 						else
-						{
-							printf("Starting client\n");
-							free(buffer);
-							client(tmp);
-							return 0;
-						}
+							if (ipFlag == 0)
+							{
+								printf("Set up ip first! cmd: set ip xxx.xxx.xxx.xxx");
+								continue;
+							}
+							else
+
+							{
+								printf("Starting client\n");
+								free(buffer);
+								client(tmp);
+								return 0;
+							}
 					}
 					else
-						printf("Wrong command\n");
+						printf("Wrong command");
 			}
 			else
-				if (!strcmp(pointerTmp, "end"))
+				if (!strcmp(pointerTmp, "quit"))
 				{
-					printf("End called.\n");
+					printf("quit called.\n");
 					return 0;
 				}
 				else
-					printf("Wrong command\n");
+					printf("Wrong command");
 
 		}
 	}
@@ -448,7 +583,8 @@ void PrintStartMsg()
 
 int main()
 {
-	//mkdir("images");
+	init_crc_tab(); //Priprava pre CRC16 Kermit
+
 	PrintStartMsg();
 	GetCommand(0,0,0,0);
 
