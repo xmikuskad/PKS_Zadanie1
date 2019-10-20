@@ -45,8 +45,16 @@
 #define		CRC_START_KERMIT	0x0000
  //pouzivanie polynomu x16 + x12 + x5 + 1 ale inverzneho!
 
+typedef struct ThreadStruc
+{
+	SOCKET socketVar;
+	int socLen;
+	struct sockaddr_in client;
+}threadStruc;
+
 static unsigned short	crc_tab[256];
-int stopKeepAlive;
+int keepAliveSignal=0;
+int end = 0;
 
 static void init_crc_tab() {
 
@@ -104,55 +112,86 @@ unsigned short crc_kermit(const unsigned char *input_str, int num_bytes) {
 
 int GetCommand();
 
-DWORD WINAPI KeepAliveClient()
+DWORD WINAPI KeepAliveClient(threadStruc *myStruc)
 {
-	clock_t start = clock();
+	clock_t start;
 	int time = 10000;
+	char *tmp = (char*)malloc(9);
+	int flag = 1;
+	SOCKET socketVar = myStruc->socketVar;
+	int socLen = myStruc->socLen;
+	struct sockaddr_in client = myStruc->client;
 
-	while (1)
+	keepAliveSignal = 1;
+
+	while (keepAliveSignal)
 	{
-		clock_t end = clock() - start;
-		if (end > time)
+		*(tmp + 2) = 0;
+		*(unsigned int*)((char*)tmp + 3) = 0;
+		start = clock();
+		flag = 1;
+		while (keepAliveSignal)
 		{
-			stopKeepAlive = 1;
+			clock_t end = clock() - start;
+			if (end > time)
+			{
+				break;
+			}
+		}
+
+		if (!keepAliveSignal)
+		{
 			return 0;
 		}
-	}
 
-	//SEND STOP TIMER PACKET
+		while (flag)
+		{
+			printf("Sending keepalive signal\n");
+			if (sendto(socketVar, tmp, 7, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
+			{
+				printf("Sending message failed, code %d\n", WSAGetLastError());
+				return 1;
+			}
+
+			if (recvfrom(socketVar, tmp, 6, 0, (struct sockaddr *)&client, &socLen) == SOCKET_ERROR)
+			{
+				if (WSAGetLastError() != 10060)
+				{
+					printf("recvfrom() failed, code %d: \n", WSAGetLastError());
+					end = 1;
+					keepAliveSignal = 0;
+					printf("Keep alive failed\n");
+					return 0;
+				}
+				else
+					continue;
+			}
+
+			if (!strcmp(tmp+1, "ack\0") && *tmp == 0)
+			{
+				printf("keep alive ack recieved\n");
+				flag = 0;
+			}
+			else
+				continue;
+		}
+
+	}
 
 	return 0;
 }
-
-DWORD WINAPI KeepAliveServer()
-{
-	clock_t start = clock();
-	int time = 10000;
-
-	while (1)
-	{
-		clock_t end = clock() - start;
-		if (end > time)
-		{
-			stopKeepAlive = 1;
-			return 0;
-		}
-	}
-
-	//SEND STOP TIMER PACKET
-
-	return 0;
-}
-
 char* CreateFirstPacket(unsigned int fragmentsCount, short sizeOfGFragments, char type, char *path)
 {
 	int size = 2;
 	char *message = (char*)malloc(sizeof(char) * 256);
 
+	*(message + size) = 1;
+	size++;
 
 	*(unsigned int*)((char*)message +size) = fragmentsCount; //num of frag
 	size += 4;
 	//STACI SHORT NA VELKOST!
+
 	*(short*)((char*)message + size) = sizeOfGFragments; //size
 	size += 2;
 
@@ -204,7 +243,7 @@ int client(struct sockaddr_in tmp)
 		return 1;
 	}
 
-	int timeout = 500;
+	int timeout = 50;
 	if (setsockopt(socketVar, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(int)) == SOCKET_ERROR)
 	{
 		printf("Timeout setting failed, code %d\n", WSAGetLastError());
@@ -225,12 +264,12 @@ int client(struct sockaddr_in tmp)
 		
 		while (flag)
 		{
-			printf("Enter data size (1-1434): ");
+			printf("Enter data size (1-1433): ");
 
 			scanf("%d", &fragSize);
 			getchar();
 			printf("Size: %d\n", fragSize);
-			if (fragSize >= 1 && fragSize <= 1434)
+			if (fragSize >= 1 && fragSize <= 1433)
 				flag = 0;
 			else
 				printf("WRONG DATA SIZE!\n");
@@ -256,7 +295,7 @@ int client(struct sockaddr_in tmp)
 
 				fragCount = (strlen(message) + fragSize - 1) / fragSize;
 				printf("SENDING FIRST PACKET\n");
-				if (sendto(socketVar, CreateFirstPacket(fragCount, fragSize+6, 'm', NULL), 256, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
+				if (sendto(socketVar, CreateFirstPacket(strlen(message)-1, fragSize+7, 'm', NULL), 256, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
 				{
 					printf("Sending message failed, code %d\n", WSAGetLastError());
 					return 1;
@@ -317,7 +356,7 @@ int client(struct sockaddr_in tmp)
 				buffer = (char*)malloc(5);
 				printf("SENDING FIRST PACKET\n");
 				fragCount = (fileLen + fragSize - 1) / fragSize;
-				if (sendto(socketVar, CreateFirstPacket(fragCount, fragSize+6, 'i', path), 256, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
+				if (sendto(socketVar, CreateFirstPacket(fileLen, fragSize+7, 'i', path), 256, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
 				{
 					printf("Sending message failed, code %d\n", WSAGetLastError());
 					return 1;
@@ -345,8 +384,10 @@ int client(struct sockaddr_in tmp)
 #pragma endregion
 
 		}
+		
 		char *tmpBuffer = (char*)malloc(9);
-		buffer = (char*)malloc(fragSize + 6);
+		buffer = (char*)malloc(fragSize + 7);
+		char testTmp = 1;
 		while (fragCount > fragAck)
 		{
 			//printf("Count %d > Ack %d\n", fragCount, fragAck);
@@ -354,45 +395,36 @@ int client(struct sockaddr_in tmp)
 			{
 				sendCount++;
 
-				*(unsigned int*)((char*)buffer + 2) = sendCount;
+				*(unsigned int*)((char*)buffer + 3) = sendCount;
+				*(buffer + 2) = 2;
+
 
 				if (imgFlag)
 				{
 					fseek(file, 0, SEEK_SET);
 					fseek(file, ((sendCount - 1) * fragSize), SEEK_CUR);
-					int readChars = fread(buffer + 6, 1, fragSize, file);
-					if(readChars < fragSize)
-					{
-						printf("Loaded less chars - %d\n",readChars);
-						*(buffer + 6 + readChars) = '\0';
-					}
+					fread(buffer + 7, 1, fragSize, file);
 				}
 				else
 				{
-					if (strlen(message + ((sendCount - 1) * fragSize)) <= fragSize)
-					{
-						strncpy(buffer + 6, message + ((sendCount - 1) * fragSize), fragSize);
-						//Aby neposielalo viacej znakov
-						*(buffer + 6 + strlen(message + ((sendCount - 1) * fragSize))-1) = '\0';
-					}
-					else
-						strncpy(buffer + 6, message + ((sendCount - 1) * fragSize), fragSize);
+						strncpy(buffer + 7, message + ((sendCount - 1) * fragSize), fragSize);
 				}
 
-				*(unsigned short*)buffer = crc_kermit(buffer + 2, fragSize - 2 + 6);
+				*(buffer + 2) = 2;
+				*(unsigned short*)buffer = crc_kermit(buffer + 2, fragSize - 2 + 7);
 
 				//UROBENIE CHYBY
-				/*if (testTmp && sendCount == 8)
+				if (testTmp && sendCount == 8)
 				{
-					*(buffer + 6) = '$';
-					*(buffer + fragSize - 1) = '#';
+					*(buffer + 8) = '$';
+					*(buffer + fragSize - 2) = '#';
 					testTmp = 0;
-				}*/
+				}
 
 				printf("Sending %d fragment\n", sendCount);
 				//printf("Info %d %s\n\n", *(unsigned int*)((char*)buffer + 2), buffer + 6);
 
-				if (sendto(socketVar, buffer, fragSize + 6, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
+				if (sendto(socketVar, buffer, fragSize + 7, 0, (struct sockaddr *)&client, socLen) == SOCKET_ERROR)
 				{
 					printf("Sending message failed, code %d\n", WSAGetLastError());
 					return 1;
@@ -401,7 +433,7 @@ int client(struct sockaddr_in tmp)
 			}
 			else
 			{
-				//tmpBuffer = (char*)malloc(9);
+
 				//DOROBIT TIMEOUT - 10060
 				flag = 1;
 				while (flag)
@@ -446,6 +478,14 @@ int client(struct sockaddr_in tmp)
 				//free(buffer);
 			}
 		}
+
+		//KeepAliveClient(SOCKET socketVar, int socLen, struct sockaddr client)
+		threadStruc *myStruc = (threadStruc*)malloc(sizeof(myStruc));
+		myStruc->client = client;
+		myStruc->socketVar = socketVar;
+		myStruc->socLen = socLen;
+		CreateThread(NULL, 0, KeepAliveClient, myStruc, 0, NULL);
+
 		printf("Do you want to continue? y/n ");
 		if (getchar() == 'n')
 		{
@@ -453,6 +493,7 @@ int client(struct sockaddr_in tmp)
 			break;
 		}
 		getchar();
+
 	}
 
 	closesocket(socketVar);
@@ -469,18 +510,18 @@ int server(struct sockaddr_in tmp)
 	char *buffer, *tmpChar, *tmpMsg, *tmpAnswer;
 	char imgFlag = 0;
 	struct sockaddr_in server, client;
-	int flag = 0, deletePls = 0;
+	int flag = 0;
 	//SPECIAL VALUES:
 	unsigned int fragCount, fragAck;
 	short fragSize;
 	unsigned short	checksum;
-	
+
 
 #pragma region load Winsock + connection
 
 	FILE *file = NULL;
 
-	socLen = sizeof(client); //WTF?
+	socLen = sizeof(client);
 
 	printf("Initializing server\n");
 
@@ -492,7 +533,6 @@ int server(struct sockaddr_in tmp)
 	}
 
 	//Set up socket
-	//if ((socketVar = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
 	if ((socketVar = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_ERROR)
 	{
 		printf("Socket failed, code %d\n", WSAGetLastError());
@@ -515,254 +555,298 @@ int server(struct sockaddr_in tmp)
 	}
 #pragma endregion
 
-
-#pragma region RECIEVE_FIRST_FRAGMENT
-	imgFlag = 0;
-	flag = 1;
-	buffer = (char*)malloc(256);
-	while (flag)
+	//int stopper = 1;
+	while (1)
 	{
-		//TESTING - CATCH FIRST FRAGMENT
-		
-		//DOROBIT TIMEOUT
-		if ((recieved_len = recvfrom(socketVar, buffer, 256, 0, (struct sockaddr*)&client, &socLen)) == SOCKET_ERROR)
+#pragma region RECIEVE_FIRST_FRAGMENT
+		printf("\nRECIEVING FIRST FRAGMENT\n");
+		imgFlag = 0;
+		flag = 1;
+		buffer = (char*)malloc(256);
+		tmpAnswer = (char*)malloc(9);
+		int lastFragSize = 0;
+		while (flag)
 		{
-			printf("Recieving data failed, code %d\n", WSAGetLastError());
-			return 1;
-
-		}
-
-		printf("Received packet from %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
-		checksum = *(unsigned short*)(buffer);
-		unsigned short checksum2 = crc_kermit((const unsigned char*)buffer + 2, 254);
-
-		if (checksum != checksum2)
-		{
-			printf("Checksum is different :(\n"); //TO DO!
-			if (sendto(socketVar, "nack\0", 5, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+			//DOROBIT TIMEOUT
+			if ((recieved_len = recvfrom(socketVar, buffer, 256, 0, (struct sockaddr*)&client, &socLen)) == SOCKET_ERROR)
 			{
-				printf("Sending back failed, code %d", WSAGetLastError());
-				return 1;
-			}
-		}
-		else
-		{
-			printf("Checksum OK!\n");
-
-			flag = 0;
-
-			printf("Pocet fragmentov je %u\n", *(unsigned int*)((char*)buffer + 2));
-			fragCount = *(unsigned int*)((char*)buffer + 2);
-			printf("Velkost fragmentov je %d\n", *(short*)((char*)buffer + 6));
-			fragSize = *(short*)((char*)buffer + 6);
-
-			int tmpLen = 0;
-			tmpChar = (char*)malloc(242);
-
-			sscanf(buffer + 8, "%s", tmpChar);
-			printf("Typ spravy je %s\n", tmpChar);
-			tmpLen += strlen(tmpChar);
-			tmpLen++;//lebo medzera
-
-			if (!strcmp(tmpChar, "img"))
-			{
-				imgFlag = 1;
-				sscanf(buffer + 12, "%s", tmpChar);
-				printf("Nazov je %s\n", tmpChar);
-				tmpLen += strlen(tmpChar);
-				tmpLen++; //lebo medzery
-
-				//ONLY NAME - NEFUNGUJE
-				int num = 0;
-				for (int j = strlen(tmpChar)-1; j > 0; j--)
+				if (WSAGetLastError() != 10060)
 				{
-					if (tmpChar[j] != '\\')
-					{
-						num++;
-					}
-					else
-						break;
-				}
-
-				char*tmpTmp = (char*)malloc(num+1);
-				strcpy(tmpTmp,buffer - num + strlen(tmpChar)+12);
-				printf("NAME: %s\n", tmpTmp);
-
-				if ((file = fopen(tmpTmp, "wb")) == NULL)
-				{
-					printf("fopen failed\n");
+					printf("recvfrom() failed, code %d: \n", WSAGetLastError());
+					system("pause");
 					return 1;
 				}
-				//KONIEC
+				else
+				{
+					printf("\nCONNECTION TIMEOUT\n");
+					system("pause");
+					return 0;
+				}
+
+			}
+
+			if (*(buffer + 2) == 2) //Ak prisli zabudnute data odoslat ACK
+			{
+				printf("Fragment %d arrived. Sending ACK\n", *(unsigned int*)((char*)buffer + 3));
+				*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 3);
+				strcpy(((char*)tmpAnswer + 4), "ack\0");
+				if (sendto(socketVar, tmpAnswer, 8, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+				{
+					printf("Sending back failed, code %d", WSAGetLastError());
+					return 1;
+				}
+				continue;
 			}
 			else
 			{
-				//tmpMsg = (char*)malloc((fragSize - 6)*fragCount);
+				if (*(buffer + 2) == 0) //Prislo keepalive
+				{
+					printf("KEEP ALIVE arrived\n");
+					*tmpAnswer = *((char*)buffer + 3);
+					strcpy(((char*)tmpAnswer + 1), "ack\0");
+					if (sendto(socketVar, tmpAnswer, 6, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+					{
+						printf("Sending back failed, code %d", WSAGetLastError());
+						return 1;
+					}
+					continue;
+				}
 			}
 
-		}
+			//printf("Received packet from %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
+			checksum = *(unsigned short*)(buffer);
+			unsigned short checksum2 = crc_kermit((const unsigned char*)buffer + 2, 254);
 
-
-		if (flag)
-		{
-			if (sendto(socketVar, "nack\0", 5, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+			if (checksum != checksum2)
 			{
-				printf("Sending back failed, code %d", WSAGetLastError());
-				return 1;
+				printf("Checksum is different :(\n"); //TO DO!
+				if (*(buffer + 2) == 1)
+				{
+					if (sendto(socketVar, "nack\0", 5, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+					{
+						printf("Sending back failed, code %d", WSAGetLastError());
+						return 1;
+						continue;
+					}
+				}
 			}
-		}
-		else
-		{
+
+			else
+			{
+				printf("Checksum OK!\n");
+
+				flag = 0;
+
+				fragSize = *(short*)((char*)buffer + 7);
+				printf("Velkost fragmentov je %d\n", fragSize);
+
+				fragCount = (*(unsigned int*)((char*)buffer + 3) + fragSize - 7 - 1) / (fragSize - 7);
+				printf("Pocet fragmentov je %u\n", fragCount);
+
+
+				lastFragSize = *(unsigned int*)((char*)buffer + 3) % (fragSize - 7);
+
+				if (lastFragSize == 0) { lastFragSize = fragSize - 7; }
+				printf("LastFragSize = %d\n", lastFragSize);
+
+				int tmpLen = 0;
+				tmpChar = (char*)malloc(241);
+
+				sscanf(buffer + 9, "%s", tmpChar);
+				printf("Typ spravy je %s\n", tmpChar);
+				tmpLen += strlen(tmpChar);
+				tmpLen++;//lebo medzera
+
+				if (!strcmp(tmpChar, "img"))
+				{
+					imgFlag = 1;
+					sscanf(buffer + 13, "%s", tmpChar);
+					printf("Nazov je %s\n", tmpChar);
+					tmpLen += strlen(tmpChar);
+					tmpLen++; //lebo medzery
+
+					//ONLY NAME - NEFUNGUJE
+					int num = 0;
+					for (int j = strlen(tmpChar) - 1; j > 0; j--)
+					{
+						if (tmpChar[j] != '\\')
+						{
+							num++;
+						}
+						else
+							break;
+					}
+
+					char*tmpTmp = (char*)malloc(num + 1);
+					strcpy(tmpTmp, buffer - num + strlen(tmpChar) + 13);
+					printf("NAME: %s\n", tmpTmp);
+
+					if ((file = fopen(tmpTmp, "wb")) == NULL)
+					{
+						printf("fopen failed\n");
+						return 1;
+					}
+					//KONIEC
+				}
+
+			}
+
+
+
 			if (sendto(socketVar, "ack\0", 5, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
 			{
 				printf("Sending back failed, code %d", WSAGetLastError());
 				return 1;
 			}
-		}
 
-		//free(tmpChar);//UVOLNIT AK SKONCIM S IMG!
-	}
-	free(buffer);
+
+			//free(tmpChar);//UVOLNIT AK SKONCIM S IMG!
+		}
+		free(buffer);
 #pragma endregion
 
 
-	//LOAD VARIABLES
-	tmpMsg = malloc(fragSize*fragCount);
-	int tmpCount = 0;
-	fragAck = 0;
-	flag = 1;
-	int testFlag = 1;
-	buffer = (char*)malloc(fragSize);
-	tmpAnswer = (char*)malloc(9);
-
-	//Keep listening for data
-	while (flag)
-	{
-		printf("\nWaiting for data...\n");
-		//buffer = (char*)malloc(fragSize);
-
-		if ((recieved_len = recvfrom(socketVar, buffer, fragSize, 0, (struct sockaddr*)&client, &socLen)) == SOCKET_ERROR)
-		{
-			printf("Recieving data failed, code %d\n", WSAGetLastError());
-			return 1;
-
-		}
-
-
-		if (*(unsigned short*)buffer != crc_kermit(buffer + 2, fragSize - 2))
-		{
-			//tmpAnswer = (char*)malloc(9);
-			printf("Wrong CRC\n");
-			*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 2);
-			strcpy(((char*)tmpAnswer + 4), "nack\0");
-
-			if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
-			{
-				printf("Sending back failed, code %d", WSAGetLastError());
-				return 1;
-			}
-			//free(tmpAnswer);
-			//free(buffer);
-			continue;
-		}
-		if (*(unsigned int*)((char*)buffer + 2) > (fragAck + 1))
-		{
-			printf("DISCARDING - fragment %d is too far ahead\n", *(unsigned int*)((char*)buffer + 2));
-			//free(buffer);
-			continue;
-		}
-
-		if (*(unsigned int*)((char*)buffer + 2) < (fragAck+1))
-		{
-			printf("DISCARDING - fragment %d already recieved\n", *(unsigned int*)((char*)buffer + 2));
-			//tmpAnswer = (char*)malloc(9);
-			*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 2);
-			strcpy(((char*)tmpAnswer + 4), "ack\0");
-
-			if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
-			{
-				printf("Sending back failed, code %d", WSAGetLastError());
-				return 1;
-			}
-			//free(tmpAnswer);
-			//free(buffer);
-			continue;
-		}
-		
-		//printf("Received packet from %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
-
+		//LOAD VARIABLES
+		tmpMsg = malloc(fragSize*fragCount);
+		int tmpCount = 0;
+		fragAck = 0;
+		flag = 1;
+		int testFlag = 1;
+		buffer = (char*)malloc(fragSize);
 		//tmpAnswer = (char*)malloc(9);
-		*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 2);
-		strcpy(((char*)tmpAnswer + 4), "ack\0");
 
-		if (file != NULL)
+		//Keep listening for data
+		while (flag)
 		{
-			if (fragAck + 1 == fragCount)
+			//printf("\nWaiting for data...\n");
+			//buffer = (char*)malloc(fragSize);
+
+			if ((recieved_len = recvfrom(socketVar, buffer, fragSize, 0, (struct sockaddr*)&client, &socLen)) == SOCKET_ERROR)
 			{
-				fwrite(buffer + 6, 1, strlen(buffer+6), file);
-				printf("Appended file %.*s\n", strlen(buffer + 6), buffer + 6);
-				//printf("Want to write %d but should write %d %.*s\n", fragSize - 6, strlen(buffer + 6), strlen(buffer + 6), buffer + 6);
+				printf("Recieving data failed, code %d\n", WSAGetLastError());
+				return 1;
+
 			}
-			else
+
+
+			if (*(unsigned short*)buffer != crc_kermit(buffer + 2, fragSize - 2))
 			{
-				fwrite(buffer + 6, 1, fragSize - 6, file);
-				printf("Appended file %.*s\n", fragSize - 6, buffer + 6);
-			}
-		}
-		else
-		{
-			if (fragAck + 1 == fragCount)
-			{
-				printf("Data: %s\n", buffer + 6);
-				strncpy(tmpMsg + ((fragAck)*(fragSize - 6)), buffer + 6, strlen(buffer+6));
-			}
-			else
-			{
-				printf("Data: %s\n", buffer + 6);
-				strncpy(tmpMsg + ((fragAck)*(fragSize - 6)), buffer + 6, fragSize - 6);
-			}
-		}
+				printf("Wrong CRC\n");
+				*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 3);
+				strcpy(((char*)tmpAnswer + 4), "nack\0");
 
-		tmpCount++;
-		printf("Pocet prijatych packetov %d\n", tmpCount);
-
-		if((fragAck+1) == 8 && testFlag)
-		{
-			testFlag = 0;
-		}
-		else
-		if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
-		{
-			printf("Sending back failed, code %d", WSAGetLastError());
-			return 1;
-		}
-
-		//free(tmpAnswer);
-		//free(buffer);
-
-		fragAck++;
-
-		printf("SENDING ACK\n");
-
-		if (fragAck == fragCount)
-		{
-			printf("All fragments arrived, I should end\n");
-			//free(buffer);
-			//free(tmpAnswer);
-			if (file == NULL)
-			{
-				printf("Final msg: %.*s\n", (fragAck-1)*(fragSize - 6)+strlen(buffer+6),tmpMsg);
-				//free(tmpMsg);
-			}
-			else
-			{
-				if (fclose(file) == EOF)
+				if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
 				{
-					printf("File can`t be closed.\n");
+					printf("Sending back failed, code %d", WSAGetLastError());
 					return 1;
 				}
-				file = NULL;
+				//free(tmpAnswer);
+				//free(buffer);
+				continue;
 			}
+			if (*(unsigned int*)((char*)buffer + 3) > (fragAck + 1))
+			{
+				printf("DISCARDING - fragment %d is too far ahead\n", *(unsigned int*)((char*)buffer + 3));
+				//free(buffer);
+				continue;
+			}
+
+			if (*(unsigned int*)((char*)buffer + 3) < (fragAck + 1))
+			{
+				printf("DISCARDING - fragment %d already recieved\n", *(unsigned int*)((char*)buffer + 3));
+				//tmpAnswer = (char*)malloc(9);
+				*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 3);
+				strcpy(((char*)tmpAnswer + 4), "ack\0");
+
+				if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+				{
+					printf("Sending back failed, code %d", WSAGetLastError());
+					return 1;
+				}
+				//free(tmpAnswer);
+				//free(buffer);
+				continue;
+			}
+
+			//printf("Received packet from %s:%d\n", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
+
+			*(unsigned int*)tmpAnswer = *(unsigned int*)((char*)buffer + 3);
+			strcpy(((char*)tmpAnswer + 4), "ack\0");
+
+			if (file != NULL)
+			{
+				if (fragAck + 1 == fragCount)
+				{
+					fwrite(buffer + 7, 1, lastFragSize, file);
+					//printf("Appended file %.*s\n", strlen(buffer + 7), buffer + 7);
+					//printf("Want to write %d but should write %d %.*s\n", fragSize - 7, strlen(buffer + 7), strlen(buffer + 7), buffer + 7);
+				}
+				else
+				{
+					fwrite(buffer + 7, 1, fragSize - 7, file);
+					//printf("Appended file %.*s\n", fragSize - 7, buffer + 7);
+				}
+			}
+			else
+			{
+				if (fragAck + 1 == fragCount)
+				{
+					//printf("Data: %s\n", buffer + 7);
+					strncpy(tmpMsg + ((fragAck)*(fragSize - 7)), buffer + 7, lastFragSize);
+				}
+				else
+				{
+					//printf("Data: %s\n", buffer + 7);
+					strncpy(tmpMsg + ((fragAck)*(fragSize - 7)), buffer + 7, fragSize - 7);
+				}
+			}
+
+			tmpCount++;
+			//printf("Pocet prijatych packetov %d\n", tmpCount);
+
+			if ((fragAck + 1) == 15 && testFlag)
+			{
+				testFlag = 0;
+			}
+			else
+				if (sendto(socketVar, tmpAnswer, 9, 0, (struct sockaddr*)&client, socLen) == SOCKET_ERROR)
+				{
+					printf("Sending back failed, code %d", WSAGetLastError());
+					return 1;
+				}
+
+			fragAck++;
+
+			//printf("SENDING ACK\n");
+
+			if (fragAck == fragCount)
+			{
+				printf("All fragments arrived, I should end\n");
+				//free(buffer);
+				//free(tmpAnswer);
+				if (file == NULL)
+				{
+					printf("Final msg: %.*s\n", (fragAck - 1)*(fragSize - 7) + lastFragSize, tmpMsg);
+					//free(tmpMsg);
+				}
+				else
+				{
+					if (fclose(file) == EOF)
+					{
+						printf("File can`t be closed.\n");
+						return 1;
+					}
+					file = NULL;
+				}
+				flag = 0;
+			}
+
+		}
+
+		int timeout = 30000;
+		if (setsockopt(socketVar, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(int)) == SOCKET_ERROR)
+		{
+			printf("Timeout setting failed, code %d\n", WSAGetLastError());
 		}
 
 	}
@@ -842,7 +926,7 @@ int GetCommand()
 						free(buffer);
 						if (server(tmp))
 						{
-							printf("There was a problem with something");
+							printf("There was a problem with something\n");
 						}
 						else
 						{
@@ -872,7 +956,7 @@ int GetCommand()
 								free(buffer);
 								if (client(tmp))
 								{
-									printf("There was a problem with something");
+									printf("There was a problem with something\n");
 								}
 								else
 								{
@@ -888,7 +972,14 @@ int GetCommand()
 							portFlag = 1;
 							tmp.sin_addr.S_un.S_addr = inet_addr("192.168.56.1");
 							ipFlag = 1;
-							client(tmp);
+							if (client(tmp))
+							{
+								printf("There was a problem with something\n");
+							}
+							else
+							{
+								system("cls");
+							}
 							return 0;
 						}
 						else
