@@ -1,26 +1,32 @@
 #include "Client.h"
 
-int keepAliveSignal = 0;
-int end = 0;
+static char keepAliveSignal = 0;
+static char end = 0;
+static char threadDone = 0;
 
 typedef struct ThreadStruc
 {
 	SOCKET socketVar;
 	int socLen;
 	struct sockaddr_in server;
+	char logFlag;
 }threadStruc;
 
-static int SendPacket(SOCKET socketVar, char* string, int size, struct sockaddr_in server, int socLen);
-
+static int SendFragment(SOCKET socketVar, char* string, short size, struct sockaddr_in server, int socLen,char logFlag);
+	
 DWORD WINAPI KeepAliveClient(threadStruc *myStruc)
 {
 	clock_t start;
-	int time = 25000;
-	char *tmp = (char*)malloc(9);
+	int time = 30000;
+	char tmp[12];
 	int flag = 1;
 	SOCKET socketVar = myStruc->socketVar;
 	int socLen = myStruc->socLen;
 	struct sockaddr_in server = myStruc->server;
+	char logFlag = myStruc->logFlag;
+	char timeoutLimit = 10;
+
+	threadDone = 0;
 
 	while (keepAliveSignal)
 	{
@@ -30,8 +36,8 @@ DWORD WINAPI KeepAliveClient(threadStruc *myStruc)
 		flag = 1;
 		while (keepAliveSignal)
 		{
-			clock_t end = clock() - start;
-			if (end > time)
+			clock_t endTime = clock() - start;
+			if (endTime > time)
 			{
 				break;
 			}
@@ -39,48 +45,60 @@ DWORD WINAPI KeepAliveClient(threadStruc *myStruc)
 
 		if (!keepAliveSignal)
 		{
+			threadDone = 1;
 			return 0;
 		}
 
-		while (flag)
+		timeoutLimit = 10;
+		while (flag && keepAliveSignal)
 		{
-			printf("Sending keepalive signal\n");
+			if(logFlag) printf("\nSending keepalive signal\n");
 
-			if (SendPacket(socketVar, tmp, 7, server, socLen)) return 1;
+			if (SendFragment(socketVar, tmp, 7, server, socLen,logFlag)) return 1;
 
 
 			if (recvfrom(socketVar, tmp, 12, 0, (struct sockaddr *)&server, &socLen) == SOCKET_ERROR)
 			{
-				if (WSAGetLastError() != 10060)
+				if (WSAGetLastError() == 10060)
 				{
-					//printf("recvfrom() failed, code %d: \n", WSAGetLastError());
-					end = 1;
-					keepAliveSignal = 0;
-					printf("\nKeep alive failed\n");
-					return 0;
+					if (timeoutLimit > 0) 
+					{
+						timeoutLimit--;
+						continue;
+					}
+					else
+					{
+						end = 1;
+						keepAliveSignal = 0;
+						threadDone = 1;
+						printf("\nKeep alive failed %d\nPress enter to continue...\n", WSAGetLastError());
+						return 0;
+					}
 				}
+				
+
 			}
 
-			if (crc_kermit(tmp + 2, 10) != *(unsigned int*)tmp || *(tmp + 2) != 0 || *(unsigned int*)((char*)tmp+3) !=0 )
+			if (crc_kermit(tmp + 2, 10) != *(unsigned short*)tmp || *(tmp + 2) != 0 || *(unsigned int*)((char*)tmp+3) !=0 )
 			{
-				printf("Wrong CRC KeepAlive\n");
+				if(logFlag) printf("Wrong CRC or %c = 0?\n",*(tmp+2));
 				continue;
 			}
 
 			if (!strcmp(tmp + 7, "_ack\0"))
 			{
-				printf("keep alive ack recieved\n");
+				if(logFlag) printf("keep alive ack recieved\n");
 				flag = 0;
 			}
 			else
 			{
-				printf("NACK KeepAlive\n");
+				if (logFlag) printf("NACK KeepAlive %s\n", tmp + 7);
 				continue;
 			}
 		}
 
 	}
-
+	threadDone = 1;
 	return 0;
 }
 
@@ -125,50 +143,74 @@ char* CreateFirstPacket(unsigned int arraySize, short sizeOfFragments, char type
 	return message;
 }
 
-static int SendPacket(SOCKET socketVar, char* string, int size, struct sockaddr_in server, int socLen)
+static int SendFragment(SOCKET socketVar, char* string, short size, struct sockaddr_in server, int socLen, char logFlag)
 {
 	if (sendto(socketVar, string, size, 0, (struct sockaddr*)&server, socLen) == SOCKET_ERROR)
 	{
-		printf("SendTo fail - %d\n", WSAGetLastError());
+		if(logFlag) printf("sendto problem %d\n", WSAGetLastError());
 		return 1;
 	}
 	return 0;
 }
 
-int client(struct sockaddr_in tmp)
+
+char client(struct sockaddr_in tmp,char logFlag,WSADATA wsaData)
 { //PRIDAT CreateThread(NULL, 0, MyTimer, NULL, 0, NULL);
-	char *buffer, *message = NULL, *fileName,*smallBuffer,*path;
+	//char *message, *fileName,*smallBuffer,*path,*dataBuffer;
 	struct sockaddr_in server;
 	int socLen = sizeof(server);
 	SOCKET socketVar;
-	WSADATA wsaData;
+	//WSADATA wsaData;
 	FILE *file = NULL;
+	HANDLE threadHandle;
+
+	keepAliveSignal = 0;
+	end = 0;
+	//threadDone = 0;
+
+	/*char *tmpBuffer = (char*)malloc(12);
+	fileName = (char*)malloc(sizeof(char) * 240);
+	path = (char*)malloc(sizeof(char) * 240);
+	message = (char*)malloc(8000);
+	char *tester = (char*)malloc(2000);
+	smallBuffer = (char*)malloc(12);*/
+	char dataBuffer[1500];
+	char message[8000], fileName[240], path[240], tmpBuffer[12], tester[2000], smallBuffer[12];
+
+	if (logFlag) printf("LOGGING ALLOWED\n");
 
 #pragma region WINSOCK LOAD
 
 	//Set up WSA
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+	/*if (!CheckWinsock())
 	{
-		printf("WSA initialization failed, code %d\n", WSAGetLastError());
-		return 1;
+		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+		{
+			if (logFlag) printf("WSAStartup init problem %d\n", WSAGetLastError());
+			return 1;
+		}
 	}
+	else
+	{
+		printf("Winsock was loaded\n");
+	}*/
 
 	//Set up socket
 	if ((socketVar = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_ERROR)
 	{
-		printf("Socket failed, code %d\n", WSAGetLastError());
+		printf("Socket problem %d\n", WSAGetLastError());
 		return 1;
 	}
 
 	int timeout = 50;
 	if (setsockopt(socketVar, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(int)) == SOCKET_ERROR)
 	{
-		printf("Timeout setting failed, code %d\n", WSAGetLastError());
+		printf("Timeout setting problem %d\n", WSAGetLastError());
 	}
 
 	server.sin_family = AF_INET;
 	server.sin_port = htons(tmp.sin_port);
-	server.sin_addr.S_un.S_addr = tmp.sin_addr.S_un.S_addr; //inet_addr(buffer);
+	server.sin_addr.S_un.S_addr = tmp.sin_addr.S_un.S_addr;
 
 #pragma endregion
 
@@ -177,45 +219,80 @@ int client(struct sockaddr_in tmp)
 	myStruc->server = server;
 	myStruc->socketVar = socketVar;
 	myStruc->socLen = socLen;
+	myStruc->logFlag = logFlag;
 
 	while (1)
 	{
-		int fragSize = 0, windowSize = 20, sendCount = 0, fileLen = 0, fragCount = 0, fragAck = 0;
-		char flag = 1, imgFlag = 0;
-		char *tester = (char*)malloc(2000);
-		if (end) return 2;
+		//int fragSize = 0, windowSize = 20, sendCount = 0, fileLen = 0, fragCount = 0, fragAck = 0;
+		char flag = 1, imgFlag = 0, timeoutLimit = 10;
+		unsigned int sendCount = 0, fragAck = 0, fileLen = 0, fragCount = 0, failNumber = 0;
+		short fragSize = 0;
+		unsigned char windowSize = 20;
 
-		while (flag)
+		if (end)
+		{
+			if (closesocket(socketVar) != 0)
+				printf("CLOSE SOCKET FAIL!");
+		/*	if (WSACleanup() != 0)
+				printf("WSA CLEANUP FAILED\n");
+			else
+				printf("I closed it\n");*/
+			return 2;
+		}
+
+		while (1)
 		{
 			printf("Enter data size (1-1473): ");
 
-			if (scanf("%d", &fragSize) == EOF)
+			if (scanf("%hd", &fragSize) == EOF)
 			{
 				printf("WRONG DATA SIZE!\n");
 				continue;
 			}
 
-			if (end) return 2;
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				return 2;
+			}
 			getchar();
-			if (end) return 2;
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				return 2;
+			}
 
 			if (fragSize >= 1 && fragSize <= 1473)
-				flag = 0;
+			{
+				if(logFlag) printf("Size: %d\n", fragSize);
+				break;
+			}
 			else
 			{
 				printf("WRONG DATA SIZE!\n");
 				continue;
 			}
 
-			printf("Size: %d\n", fragSize);
+			
 		}
 
 		char command;
 		do {
-			if (end) return 2;
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				/*if (WSACleanup() != 0)
+					printf("WSA CLEANUP FAILED\n");
+				else
+					printf("I closed it\n");*/
+				return 2;
+			}
 			printf("\nSend msg or file? m/f ");
 			command = getchar();
-			printf("%c\n", command);
+			//printf("%c\n", command);
 			getchar();
 		} while (command != 'm' && command != 'f');
 
@@ -225,7 +302,6 @@ int client(struct sockaddr_in tmp)
 
 			//Sprava moze mat az 2000 znakov
 			printf("Enter message:\n");
-			message = (char*)malloc(sizeof(char) * 10000);
 			fgets(message, 10000, stdin);
 
 			while (1)
@@ -235,49 +311,95 @@ int client(struct sockaddr_in tmp)
 					break;
 				strcat(message, tester);
 			}
-			//strcat(message, tester);
 
-			printf("MSG: %s", message);
+			//if(logFlag) printf("MSG: \n%s", message);
 
-			if (end) return 2;
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				/*if (WSACleanup() != 0)
+					printf("WSA CLEANUP FAILED\n");*/
+				else
+					printf("I closed it\n");
+				return 2;
+			}
+			keepAliveSignal = 0;
+
+			fragCount = (strlen(message) - 1 + fragSize - 1) / fragSize;
+
+			while (1)
+			{
+				printf("\nDo you want to send wrong packet?\nType 1-%d to send or 0 to do nothing: ", fragCount);
+
+				if (scanf("%d", &failNumber) == EOF)
+				{
+					printf("WRONG INPUT!\n");
+					continue;
+				}
+
+				getchar();
+
+				if (failNumber >= 0 && failNumber <= fragCount)
+				{
+					if (logFlag) printf("Corrupted fragment number: %d\n", failNumber);
+					break;
+				}
+				else
+				{
+					printf("WRONG INPUT!\n");
+					continue;
+				}
+
+
+			}
+
 
 #pragma region SEND_FIRST_PACKET_MSG
-			flag = 1;
-			smallBuffer = (char*)malloc(12 * sizeof(char));
-			while (flag)
+			//flag = 1;
+			timeoutLimit = 10;
+			while (1)
 			{
-				keepAliveSignal = 0;
-				//buffer = (char*)malloc(12 * sizeof(char));
-
-				fragCount = (strlen(message) + fragSize - 1) / fragSize;
-				printf("SENDING FIRST PACKET\n");
-				if (SendPacket(socketVar, CreateFirstPacket(strlen(message) - 1, fragSize + 7, 'm', NULL), 256, server, socLen)) return 1;
+				printf("Sending first info\n");
+				if (SendFragment(socketVar, CreateFirstPacket(strlen(message)-1, fragSize + 7, 'm', NULL), 256, server, socLen,logFlag)) return 1;
 
 				//DOROBIT TIMEOUT
 				if (recvfrom(socketVar, smallBuffer, 12, 0, (struct sockaddr *)&server, &socLen) == SOCKET_ERROR)
 				{
-					printf("recvfrom() failed, code %d: \n", WSAGetLastError());
+					if (WSAGetLastError() == 10060)
+					{
+						if(logFlag) printf("First frag timeout\n");
+						timeoutLimit--;
+						if (timeoutLimit <= 0)
+						{
+							if(logFlag) printf("Timeout limit reached\n");
+							if (closesocket(socketVar) != 0)
+								printf("CLOSE SOCKET FAIL!");
+							/*if (WSACleanup() != 0)
+								printf("WSA CLEANUP FAILED\n");
+							else
+								printf("I closed it\n");*/
+							return 2;
+						}
+						continue;
+					}
+					else
+					if(logFlag) printf("recvfrom problem %d: \n", WSAGetLastError());
 					return 1;
 				}
 
 				if (*(unsigned short*)smallBuffer != crc_kermit(smallBuffer + 2, 10) || *(smallBuffer + 2) != 1)
 				{
-					printf("Wrong CRC or type\n");
+					if(logFlag) printf("Wrong CRC or type\n");
 					continue;
 				}
 
-				printf("RESULT: %s\n", smallBuffer+7);
-				if (!strcmp(smallBuffer+7, "nack"))
+				if(logFlag) printf("Answer: %s\n", smallBuffer+7);
+				if (strcmp(smallBuffer+7, "nack"))
 				{
-					printf("FAIL, SEND AGAIN\n");
-				}
-				else
-				{
-					printf("GOOD, CONTINUE\n");
-					flag = 0;
+					break; //ACK
 				}
 			}
-			free(smallBuffer);
 #pragma endregion
 
 
@@ -287,11 +409,18 @@ int client(struct sockaddr_in tmp)
 			imgFlag = 1;
 
 			printf("Enter file position:\n");
-			fileName = (char*)malloc(sizeof(char) * 256);
-			path = (char*)malloc(sizeof(char) * 256);
 			fgets(path, 255, stdin);
 
-			if (end) return 2;
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				/*if (WSACleanup() != 0)
+					printf("WSA CLEANUP FAILED\n");
+				else
+					printf("I closed it\n");*/
+				return 2;
+			}
 
 			//char nameFlag = 0;
 
@@ -301,8 +430,8 @@ int client(struct sockaddr_in tmp)
 			//IMAGE MANAGING
 			if ((file = (fopen(path, "rb"))) == NULL)
 			{
-				printf("File failed to open\n%s\n", path);
-				system("pause");
+				if(logFlag) printf("File failed to open\n%s\n", path);
+				//system("pause");
 
 				return 1;
 			}
@@ -310,7 +439,7 @@ int client(struct sockaddr_in tmp)
 			if (strstr(path, "\\")==NULL)
 			{
 				strcpy(fileName, path);
-				strcpy(path, __FILE__);
+				/*strcpy(path, __FILE__);
 
 				int j;
 				for (j = strlen(path) - 1; j > 0; j--)
@@ -321,7 +450,10 @@ int client(struct sockaddr_in tmp)
 					}
 				}
 
-				strcpy(path + j + 1, fileName);
+				strcpy(path + j + 1, fileName);*/
+
+				_fullpath(path, fileName, 240);
+
 			}
 			else
 			{
@@ -341,29 +473,74 @@ int client(struct sockaddr_in tmp)
 			printf("File path: %s\n", path);
 
 
-			free(path);
+			//free(path);
 			fseek(file, 0, SEEK_END);
 			fileLen = ftell(file);
 			fseek(file, 0, SEEK_SET);
 
-#pragma region SEND_FIRST_PACKET_IMG
+			fragCount = (fileLen + fragSize - 1) / fragSize;
 
-			flag = 1;
-			smallBuffer = (char*)malloc(12);
-			while (flag)
+			while (1)
 			{
-				keepAliveSignal = 0;
-				
-				printf("SENDING FIRST PACKET\n");
-				fragCount = (fileLen + fragSize - 1) / fragSize;
+				printf("\nDo you want to send wrong packet?\nType 1-%d to send or 0 to do nothing: ", fragCount);
 
-				if (SendPacket(socketVar, CreateFirstPacket(fileLen, fragSize + 7, 'i', fileName), 256, server, socLen)) return 1;
+				if (scanf("%d", &failNumber) == EOF)
+				{
+					printf("WRONG INPUT!\n");
+					continue;
+				}
+
+				getchar();
+
+				if (failNumber >= 0 && failNumber <= fragCount)
+				{
+					if (logFlag) printf("Corrupted fragment number: %d\n", failNumber);
+					break;
+				}
+				else
+				{
+					printf("WRONG INPUT!\n");
+					continue;
+				}
+
+
+			}
+
+#pragma region SEND_FIRST_PACKET_IMG
+			keepAliveSignal = 0;
+			//flag = 1;
+			timeoutLimit = 10;
+			while (1)
+			{
+				
+				printf("Sending first info\n");
+
+				if (SendFragment(socketVar, CreateFirstPacket(fileLen, fragSize + 7, 'i', fileName), 256, server, socLen,logFlag)) return 1;
 
 
 				//DOROBIT TIMEOUT
 				if (recvfrom(socketVar, smallBuffer, 12, 0, (struct sockaddr *)&server, &socLen) == SOCKET_ERROR)
 				{
-					printf("recvfrom() failed, code %d: \n", WSAGetLastError());
+					if (WSAGetLastError() == 10060)
+					{
+						if (logFlag) printf("First frag timeout\n");
+						timeoutLimit--;
+						if (timeoutLimit <= 0)
+						{
+							if (logFlag) printf("Timeout limit reached\n");
+							if (closesocket(socketVar) != 0)
+								printf("CLOSE SOCKET FAIL!");
+							/*if (WSACleanup() != 0)
+								printf("WSA CLEANUP FAILED\n");
+							else
+								printf("I closed it\n");*/
+							return 2;
+						}
+						continue;
+					}
+
+					else
+					if(logFlag) printf("recvfrom problem %d\n", WSAGetLastError());
 					return 1;
 				}
 
@@ -372,64 +549,84 @@ int client(struct sockaddr_in tmp)
 					continue;
 				}
 
-				printf("RESULT: %s\n", smallBuffer+7);
-				if (!strcmp(smallBuffer+7, "nack"))
+				if(logFlag) printf("Answer: %s\n", smallBuffer+7);
+				if (strcmp(smallBuffer+7, "nack"))
 				{
-					printf("FAIL, SEND AGAIN\n");
+					break;
 				}
-				else
-				{
-					printf("GOOD, CONTINUE\n");
-					flag = 0;
-				}
+
 			}
-			free(smallBuffer);
-			free(fileName);
 #pragma endregion
 
 		}
 
-		char *tmpBuffer = (char*)malloc(12);
-		buffer = (char*)malloc(fragSize + 7);
+		/*
+		while (1)
+		{
+			printf("Do you want to send wrong packet?\nType 1-%d to send or 0 to do nothing",fragCount);
+
+			if (scanf("%d", &failNumber) == EOF)
+			{
+				printf("WRONG INPUT!\n");
+				continue;
+			}
+
+			getchar();
+
+			if (failNumber >= 1 && failNumber <= fragCount)
+			{
+				if (logFlag) printf("Corrupted fragment number: %d\n", failNumber);
+				break;
+			}
+			else
+			{
+				printf("WRONG INPUT!\n");
+				continue;
+			}
+
+
+		}
+		*/
+
+		//char *dataBuffer = (char*)malloc(fragSize + 7);
 		char testTmp = 1;
+		timeoutLimit = 10;
 		while (fragCount > fragAck)
 		{
-			//printf("Count %d > Ack %d\n", fragCount, fragAck);
 			if (sendCount - fragAck < windowSize && sendCount < fragCount)
 			{
 				sendCount++;
 
-				*(unsigned int*)((char*)buffer + 3) = sendCount;
-				*(buffer + 2) = 2;
+				*(unsigned int*)((char*)dataBuffer + 3) = sendCount;
+				*(dataBuffer + 2) = 2;
 
 
 				if (imgFlag)
 				{
 					fseek(file, 0, SEEK_SET);
 					fseek(file, ((sendCount - 1) * fragSize), SEEK_CUR);
-					fread(buffer + 7, 1, fragSize, file);
+					fread(dataBuffer + 7, 1, fragSize, file);
 				}
 				else
 				{
-					strncpy(buffer + 7, message + ((sendCount - 1) * fragSize), fragSize);
+					strncpy(dataBuffer + 7, message + ((sendCount - 1) * fragSize), fragSize);
 				}
 
-				*(buffer + 2) = 2;
-				*(unsigned short*)buffer = crc_kermit(buffer + 2, fragSize - 2 + 7);
+				*(dataBuffer + 2) = 2;
+				*(unsigned short*)dataBuffer = crc_kermit(dataBuffer + 2, fragSize - 2 + 7);
 
-				//UROBENIE CHYBY
-				/*
-				if (testTmp && sendCount == 8)
+				if (*(unsigned int*)((char*)dataBuffer + 3) == failNumber)
 				{
-					*(buffer + 8) = '$';
-					*(buffer + fragSize - 2) = '#';
+					*(dataBuffer + fragSize -1) = '~';
+					*(dataBuffer + fragSize / 2) = '_';
 					testTmp = 0;
+					failNumber = 0;
 				}
-				*/
-				//printf("Sending %d fragment\n", sendCount);
-				//printf("Info %d %s\n\n", *(unsigned int*)((char*)buffer + 2), buffer + 6);
 
-				if (SendPacket(socketVar, buffer, fragSize + 7, server, socLen)) return 1;
+				if(logFlag) printf("Sending %d fragment\n", sendCount);
+				//printf("Info %d %s\n\n", *(unsigned int*)((char*)dataBuffer + 2), dataBuffer + 6);
+
+				if (SendFragment(socketVar, dataBuffer, fragSize + 7, server, socLen,logFlag)) return 1;
 
 			}
 			else
@@ -442,38 +639,52 @@ int client(struct sockaddr_in tmp)
 					{
 						if (WSAGetLastError() != 10060)
 						{
-							printf("recvfrom() failed, code %d: \n", WSAGetLastError());
-							system("pause");
+							if(logFlag) printf("recvfrom problem %d\n", WSAGetLastError());
+							//system("pause");
 							return 1;
 						}
 						else
 						{
 							sendCount = fragAck;
 							flag = 0;
-							printf("\nTIMEOUT!\n");
+							if(logFlag) printf("\nTIMEOUT!\n");
+							timeoutLimit--;
+							if (timeoutLimit <= 0)
+							{
+								if(logFlag) printf("timeout limit reached\n");
+								if (closesocket(socketVar) != 0)
+									printf("CLOSE SOCKET FAIL!");
+								/*if (WSACleanup() != 0)
+									printf("WSA CLEANUP FAILED\n");
+								else
+									printf("I closed it\n");*/
+								return 2;
+							}
 							continue;
 						}
 					}
 
+					if(logFlag)	printf("Recieved %d %s\n",*(unsigned int*)((char*)tmpBuffer + 3), tmpBuffer + 7);
+
 					if (*(unsigned short*)tmpBuffer != crc_kermit(tmpBuffer + 2, 10))
 					{
-						printf("Wrong CRC\n");
+						if(logFlag)	printf("Wrong CRC\n");
 						continue;
 					}
 
 					if (*(tmpBuffer + 2) != 2)
 					{
-						printf("Wrong type\n");
+						if(logFlag)	printf("Wrong type\n");
 						continue;
 					}
 
-					//printf("Recieved %d %s\n", *(unsigned int*)((char*)tmpBuffer + 3), tmpBuffer + 7);
 					//printf("ACK: %d SEND %d\n", fragAck, sendCount);
 
 					if (*(unsigned int*)((char*)tmpBuffer+3) == (fragAck + 1) && !strcmp(tmpBuffer + 7, "_ack\0"))
 					{
 						fragAck++;
 						flag = 0;
+						timeoutLimit = 10;
 					}
 					else
 						if (*(unsigned int*)((char*)tmpBuffer + 3) > (fragAck + 1) && !strcmp(tmpBuffer + 7, "_ack\0"))
@@ -490,22 +701,67 @@ int client(struct sockaddr_in tmp)
 		}
 
 		keepAliveSignal = 1;
-		CreateThread(NULL, 0, KeepAliveClient, myStruc, 0, NULL);
+		threadHandle = CreateThread(NULL, 0, KeepAliveClient, myStruc, 0, NULL);
+		//free(dataBuffer);
 
 		printf("Do you want to continue? y/n ");
 		if (getchar() == 'n')
 		{
-			getchar();
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				/*if (WSACleanup() != 0)
+					printf("WSA CLEANUP FAILED\n");
+				else
+					printf("I closed it\n");*/
+				return 2;
+			}
 			keepAliveSignal = 0;
+			getchar();
 			break;
 		}
 		else
+		{
+			if (end)
+			{
+				if (closesocket(socketVar) != 0)
+					printf("CLOSE SOCKET FAIL!");
+				/*if (WSACleanup() != 0)
+					printf("WSA CLEANUP FAILED\n");
+				else
+					printf("I closed it\n");*/
+				return 2;
+			}
 			getchar();
+		}
 
 	}
 
-	closesocket(socketVar);
-	WSACleanup();
+
+	/*free(message);
+	free(smallBuffer);
+	free(tester);
+	free(fileName);
+	free(path);*/
+
+	while (!threadDone) {}; //pockanie na thread
+
+	printf("KONCIM\n");
+	/*if (threadHandle != NULL)
+	{
+		TerminateThread(threadHandle, 0);
+		threadHandle = NULL;
+	}*/
+
+	if (closesocket(socketVar)!=0)
+		printf("CLOSE SOCKET FAIL!");
+
+	/*if (WSACleanup() != 0)
+		printf("WSA CLEANUP FAILED\n");
+	else
+		printf("I closed it\n");*/
+
 
 	return 0;
 }

@@ -5,6 +5,7 @@
 
 #pragma comment(lib,"ws2_32.lib") //winsock library
 
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <time.h>
 #include "Crc16.h"
@@ -22,27 +23,25 @@ void PrintStartMsg()
 	printf("\tset ip xxx.xxx.xxx.xxx \n");
 	printf("\tstart server (need to set port first)\n");
 	printf("\tstart client (need to set ip and port first)\n");
+	printf("\tallow logging - turns on log printing\n");
 	printf("\tquit - ends program\n");
 
 }
 
-int GetCommand()
+int GetCommand(WSADATA wsaData)
 {
 	char *pointerTmp;
-	char *buffer = (char*)malloc(sizeof(char) * 255);
-	struct sockaddr_in tmp;
+	char myBuffer[255];
 	char ipFlag = 0, portFlag = 0, logFlag = 0;
-
-	//NA ZISTENIE ADRESY
-	//printf("__FILE__: %s\n", __FILE__);
+	struct sockaddr_in tmp;
 
 	PrintStartMsg();
 
 	while (1)
 	{
 		printf("\nEnter command: ");
-		fgets(buffer, 29, stdin);
-		pointerTmp = strtok(buffer, " \n");
+		fgets(myBuffer, 29, stdin);
+		pointerTmp = strtok(myBuffer, " \n");
 
 		if (pointerTmp != NULL && !strcmp(pointerTmp, "set"))
 		{
@@ -80,8 +79,7 @@ int GetCommand()
 					else
 					{
 						printf("Starting server\n");
-						free(buffer);
-						char endMsg = server(tmp,logFlag);
+						char endMsg = server(tmp,logFlag,wsaData);
 						if (endMsg == 1)
 						{
 							printf("There was a problem with something\n");
@@ -89,12 +87,12 @@ int GetCommand()
 						else
 							if (endMsg == 2)
 							{
-								system("cls");
+								printf("\n\n\n\n\n");
 								printf("Connection timed out.\n");
 							}
 							else
 							{
-								system("cls");
+								printf("\n\n\n\n\n");
 							}
 						return 0;
 					}
@@ -117,8 +115,8 @@ int GetCommand()
 
 							{
 								printf("Starting client\n");
-								free(buffer);
-								char endMsg = client(tmp,logFlag);
+								//free(myBuffer);
+								char endMsg = client(tmp,logFlag,wsaData);
 								if (endMsg == 1)
 								{
 									printf("There was a problem with something\n");
@@ -126,14 +124,13 @@ int GetCommand()
 								else
 									if (endMsg == 2)
 									{
-										system("cls");
+										printf("\n\n\n\n\n");
 										printf("Connection timed out.\n");
 									}
 									else
 									{
-										system("cls");
+										printf("\n\n\n\n\n");
 									}
-								return 0;
 								return 0;
 							}
 					}
@@ -145,7 +142,7 @@ int GetCommand()
 							tmp.sin_addr.S_un.S_addr = inet_addr("192.168.56.1");
 							ipFlag = 1;
 							logFlag = 1;
-							char endMsg = client(tmp,logFlag);
+							char endMsg = client(tmp,logFlag,wsaData);
 							if (endMsg == 1)
 							{
 								printf("There was a problem with something\n");
@@ -153,13 +150,14 @@ int GetCommand()
 							else
 								if (endMsg == 2)
 								{
-									system("cls");
+									printf("\n\n\n\n\n");
 									printf("Connection timed out.\n");
 								}
 								else
 								{
-									system("cls");
+									printf("\n\n\n\n\n");
 								}
+							//free(myBuffer);
 							return 0;
 						}
 						else
@@ -168,11 +166,16 @@ int GetCommand()
 			else
 				if (pointerTmp != NULL && !strcmp(pointerTmp, "quit"))
 				{
-					system("pause");
-					exit(0);
+					//system("pause");
+					//free(myBuffer);
+					//WSACleanup();
+					printf("VYPINAM\n");
+					//exit(0);
+					return 2;
+					//exit(EXIT_SUCCESS);
 				}
 				else
-					/*if (pointerTmp != NULL && !strcmp(pointerTmp, "allow"))
+					if (pointerTmp != NULL && !strcmp(pointerTmp, "allow"))
 					{
 							pointerTmp = strtok(NULL, " \n");
 							if (pointerTmp != NULL && !strcmp(pointerTmp, "logging"))
@@ -180,12 +183,15 @@ int GetCommand()
 								logFlag = 1;
 								printf("Log function enabled.\n");
 							}
+							else
+								printf("Wrong command");
 					}
-					else*/
+					else
 						printf("Wrong command");
 
 		}
 	}
+	//free(myBuffer);
 
 	return 0;
 }
@@ -194,10 +200,20 @@ int main()
 {
 	init_crc_tab(); //Priprava pre CRC16 Kermit
 
+	WSADATA wsaData;
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+	{
+		printf("WSAStartup init problem %d\n", WSAGetLastError());
+		return 1;
+	}
+
 	while (1)
 	{
-		GetCommand();
+		if (GetCommand(wsaData) == 2)
+			break;
 	}
+
+	WSACleanup();
 
 	return 0;
 }

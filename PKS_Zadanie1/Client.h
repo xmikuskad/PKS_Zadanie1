@@ -5,9 +5,10 @@
 
 #pragma comment(lib,"ws2_32.lib") //winsock library
 
+#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <time.h>
 #include "Crc16.h"
 
 
-int client(struct sockaddr_in tmp);
+char client(struct sockaddr_in tmp, char logFlag, WSADATA wsaData);
